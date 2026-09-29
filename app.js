@@ -12,8 +12,12 @@ const S = {
   session: null, profile: null, phone: null,
   peer: null, call: null, callStream: null,
   maps: [], viewCh: [], globalCh: null, camStream: null,
-  reqTab: null, installEvt: null, draft: null,
+  reqTab: null, installEvt: null, draft: null, timers: [],
+  startedAt: 0, screens: new Set(),
 };
+
+// Feedback kab poochhein: login ke 90 sec baad + kam se kam 3 alag screen dekhne ke baad (ya kisi kaam ke poora hone pe)
+const FB_AFTER_MS = 90 * 1000, FB_MIN_SCREENS = 3;
 const uid = () => S.session?.user?.id;
 
 // ---------- small helpers ----------
@@ -135,6 +139,8 @@ async function loadMe() {
   startPeer();
   subscribeGlobal();
   refreshBadge();
+  S.startedAt = S.startedAt || Date.now();
+  if (!S.fbWatch) S.fbWatch = setInterval(checkFeedbackTime, 15000);
 }
 
 function teardownMe() {
@@ -155,6 +161,8 @@ function cleanupView() {
   S.viewCh = [];
   stopCamStream();
   stopListening();
+  S.timers.forEach(clearInterval);
+  S.timers = [];
 }
 
 const ROUTES = [
@@ -167,13 +175,21 @@ const ROUTES = [
   [/^chat\/([\w-]+)$/, viewChat],
   [/^profile$/, viewProfile],
   [/^onboard$/, viewOnboard],
+  [/^stats$/, viewStats],
+  [/^feedback$/, viewFeedback],
 ];
+const PUBLIC = ['stats', 'feedback'];
 
 async function render() {
   cleanupView();
   window.scrollTo(0, 0);
   const path = location.hash.replace(/^#\/?/, '').split('?')[0];
   const nav = $('#nav');
+  if (PUBLIC.includes(path)) {
+    $('#nav').hidden = !S.session || needsOnboard();
+    $$('#nav a').forEach(a => a.classList.remove('on'));
+    try { return await (path === 'stats' ? viewStats() : viewFeedback()); } catch (e) { console.error(e); app.innerHTML = errorBox(e); return; }
+  }
   if (!S.session) {
     if (path && path !== 'login') store.set('ks_after_login', path);
     nav.hidden = true;
@@ -184,6 +200,8 @@ async function render() {
   const after = store.get('ks_after_login', null);
   if (after && path === '') { store.set('ks_after_login', null); return go(after); }
   $$('#nav a').forEach(a => a.classList.toggle('on', path.startsWith(a.dataset.r) || (a.dataset.r === 'my' && path === 'add')));
+  S.screens.add(path.split('/')[0] || 'home');
+  setTimeout(checkFeedbackTime, 1500);
   for (const [re, fn] of ROUTES) {
     const m = path.match(re);
     if (m) {
@@ -215,7 +233,8 @@ function viewLogin() {
   <button id="glogin" class="btn block gbtn">
     <svg viewBox="0 0 48 48" aria-hidden="true" style="width:20px;height:20px;stroke:none"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.6 5.4 2.7 13.3l7.9 6.1C12.5 13.6 17.8 9.5 24 9.5z"/><path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.2 5.3-4.6 6.9l7.4 5.7c4.3-4 6.9-9.9 6.9-17.1z"/><path fill="#FBBC05" d="M10.6 28.6A14.5 14.5 0 0 1 9.5 24c0-1.6.3-3.2.8-4.6l-7.9-6.1A24 24 0 0 0 0 24c0 3.9.9 7.5 2.7 10.7l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.8-5.8l-7.4-5.7c-2.1 1.4-4.8 2.3-8.4 2.3-6.2 0-11.5-4.1-13.4-9.8l-7.9 6.1C6.6 42.6 14.6 48 24 48z"/></svg>Google se login karo
   </button>
-  <p class="small muted" style="text-align:center;margin-top:12px">Login karke aap <a href="/privacy.html">privacy niyam</a> maante hain.</p>`;
+  <p class="small muted" style="text-align:center;margin-top:12px">Login karke aap <a href="/privacy.html">privacy niyam</a> maante hain.</p>
+  <div class="row section"><a class="btn ghost" href="#/stats">📊 Live numbers dekho</a><a class="btn ghost" href="#/feedback">⭐ Bina login rate karo</a></div>`;
   $('#glogin').onclick = async () => {
     const { error } = await sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: location.origin + '/' } });
     if (error) toast(error.message, 'bad');
@@ -483,7 +502,7 @@ async function viewRoom(id) {
         : await sb.from('requests').insert({ listing_id: id, tenant_id: uid(), message: msg });
       if (error) { $('#r-send').disabled = false; return toast(error.message, 'bad'); }
       toast('Request bhej di ✅ Makaan malik ko turant notification gaya', 'good');
-      render();
+      render(); nudgeFeedback();
     };
   } else if (req.status === 'pending') {
     A.innerHTML = `<div class="card stack">
@@ -639,6 +658,7 @@ function viewAdd() {
     stopListening();
     const b = $('#a-ai'); b.disabled = true; b.textContent = 'AI samajh raha hai…';
     const out = await aiFill(text, D.lang);
+    D.aiUsed = true;
     b.disabled = false; b.textContent = 'AI se form bharo';
     let n = 0;
     for (const [k, v] of Object.entries(out || {})) {
@@ -824,7 +844,7 @@ async function publishListing(D) {
       landlord_id: uid(), title: F.title.trim(), rent: +F.rent, deposit: +F.deposit || 0,
       room_type: F.room_type, furnished: F.furnished, electricity: F.electricity, water_included: F.water_included,
       tenant_pref: F.tenant_pref, food_pref: F.food_pref, amenities: F.amenities, locality: F.locality.trim(), city: F.city.trim(),
-      description: F.description.trim() || null, media_verified: true,
+      description: F.description.trim() || null, media_verified: true, via_voice: !!D.aiUsed,
     }).select().single();
     if (error) throw error;
 
@@ -846,7 +866,7 @@ async function publishListing(D) {
     if (p.error) throw p.error;
 
     show(4);
-    setTimeout(() => { root.innerHTML = ''; S.draft = null; toast('Kamra live ho gaya ✅ Ab paas ke log dekh sakte hain', 'good'); go('room/' + l.id); }, 700);
+    setTimeout(() => { root.innerHTML = ''; S.draft = null; toast('Kamra live ho gaya ✅ Ab paas ke log dekh sakte hain', 'good'); go('room/' + l.id); nudgeFeedback(); }, 700);
   } catch (e) { fail(e); }
 }
 
@@ -940,7 +960,7 @@ async function viewRequests() {
   }).join('');
 
   const setSt = async (id, st, msg) => { const { error } = await sb.from('requests').update({ status: st }).eq('id', id); if (error) return toast(error.message, 'bad'); toast(msg, 'good'); render(); };
-  $$('[data-ap]').forEach(b => b.onclick = () => setSt(b.dataset.ap, 'approved', 'Approve kar diya ✅ Kirayedar ko aapka number aur location mil gayi'));
+  $$('[data-ap]').forEach(b => b.onclick = async () => { await setSt(b.dataset.ap, 'approved', 'Approve kar diya ✅ Kirayedar ko aapka number aur location mil gayi'); nudgeFeedback(); });
   $$('[data-rj]').forEach(b => b.onclick = () => setSt(b.dataset.rj, 'rejected', 'Mana kar diya'));
   $$('[data-call]').forEach(b => b.onclick = () => startCall(b.dataset.call, b.dataset.name, b.dataset.av, b.dataset.t));
 }
@@ -999,6 +1019,7 @@ function viewProfile() {
     </div>
     ${S.installEvt ? `<button id="p-install" class="btn genda">📲 Phone pe app install karo</button>` : `<p class="small muted">App jaisa chalane ke liye: Chrome menu (⋮) → "Add to Home screen".</p>`}
     <p class="small muted">Internet call ke liye yeh app khula rehna chahiye — upar hara dot = aap call le sakte ho.</p>
+    <div class="row"><a class="btn ghost" href="#/feedback">⭐ App ko rate karo</a><a class="btn ghost" href="#/stats">📊 Live numbers</a></div>
     <a class="btn ghost" href="/privacy.html">Privacy niyam</a>
     <button id="p-out" class="btn danger">Logout</button></div>`;
   let role = p.role;
@@ -1014,6 +1035,223 @@ function viewProfile() {
   };
   $('#p-install')?.addEventListener('click', async () => { S.installEvt.prompt(); S.installEvt = null; });
   $('#p-out').onclick = async () => { await sb.auth.signOut(); };
+}
+
+// =============================================================
+//  FEEDBACK — User Testing ke sawaal (bina login bhi)
+// =============================================================
+const FB_PROB = {
+  tenant: ['Ghar-ghar ghoomna padta hai', 'Broker ko commission dena padta hai', 'Budget mein kamra nahi milta', 'Photo/jaankari asli nahi hoti', 'Anjaan ko number dene mein darr', 'Kuch aur'],
+  landlord: ['Sahi kirayedar nahi milta', 'Broker ka commission', 'Anjaan logon ke baar-baar calls', 'Kamra mahino khaali rehta hai', 'Kirayedar pe bharosa nahi hota', 'Kuch aur'],
+};
+FB_PROB.visitor = FB_PROB.tenant;
+const FB_FEAT = ['Budget se search', 'Map pe paas ke kamre', 'Number chhupa internet call', 'Bol ke kamra daalna (AI)', 'Live photo + GPS', 'Approve ke baad hi location', 'Kuch aur'];
+const FB_ROLE = { tenant: 'Kirayedar', landlord: 'Makaan malik', visitor: 'Dekhne wale' };
+
+function checkFeedbackTime() {
+  if (!S.session || needsOnboard() || !S.startedAt) return;
+  const path = location.hash.replace(/^#\/?/, '');
+  if (['add', 'feedback', 'stats', 'onboard'].includes(path) || path.startsWith('chat/')) return; // kaam ke beech mat roko
+  const a = document.activeElement;
+  if (a && ['INPUT', 'TEXTAREA', 'SELECT'].includes(a.tagName)) return; // type kar raha ho to nahi
+  if (S.call || Date.now() - S.startedAt < FB_AFTER_MS || S.screens.size < FB_MIN_SCREENS) return;
+  nudgeFeedback(0);
+}
+
+function nudgeFeedback(delay = 2500) {
+  const done = store.get('ks_fb_done', 0), asked = store.get('ks_fb_asked', 0);
+  if (done || Date.now() - asked < 864e5) return;
+  setTimeout(() => {
+    if ($('#overlay-root').innerHTML) return;
+    store.set('ks_fb_asked', Date.now());
+    $('#overlay-root').innerHTML = `<div class="overlay"><div class="sheet">
+      <span class="tag big" style="justify-self:center">30 second</span>
+      <h2>KirayaSetu kaisa laga?</h2><p class="muted">Sirf 5 sawaal — aapki raay se hum app ${S.profile?.role === 'landlord' ? 'makaan malikon' : 'kirayedaron'} ke liye behtar banayenge.</p>
+      <div class="row"><button class="btn ghost" id="nd-no">Baad mein</button><button class="btn genda" id="nd-yes">Abhi batata hoon</button></div></div></div>`;
+    $('#nd-no').onclick = () => ($('#overlay-root').innerHTML = '');
+    $('#nd-yes').onclick = () => { $('#overlay-root').innerHTML = ''; go('feedback'); };
+  }, delay);
+}
+
+const FB_FACES = [['😞', 'Bahut bura'], ['🙁', 'Bura'], ['😐', 'Theek-thaak'], ['🙂', 'Achha'], ['🤩', 'Zabardast']];
+const FB_ISSUES = ['Samajhna mushkil laga', 'Mere area mein kamre kam', 'Login mein dikkat', 'App slow hai', 'Call/chat nahi chala', 'Bol ke bharna galat samjha', 'Kuch aur'];
+const FB_MAX = 2;
+
+// Uber/Zomato jaisa: ek screen pe ek sawaal, pehle star, phir star ke hisaab se sawaal
+function viewFeedback() {
+  const A = { role: S.profile?.role || '', stars: 0, problems: [], features: [], issues: [], need: '', rec: null, text: '', city: S.profile?.city || '' };
+  const steps = ['stars', 'tags', 'problem', 'need', 'text'];
+  const guest = !S.session;
+  let i = 0;
+  const next = (delay = 0) => setTimeout(() => { i = Math.min(i + 1, steps.length - 1); draw(); }, delay);
+  const chips = (list, key) => `<div class="chips fb-chips">${list.map(x => `<button class="chip ${A[key].includes(x) ? 'on' : ''}" data-tag="${esc(x)}">${esc(x)}</button>`).join('')}</div>`;
+
+  function draw() {
+    const st = steps[i], role = A.role || 'visitor', last = i === steps.length - 1;
+    let q = '', sub = '', body = '', can = true, skip = false, tagKey = null;
+    if (st === 'role') {
+      q = 'Aap kaun ho?'; can = !!A.role;
+      body = `<div class="opts">${[['tenant', '🔍', 'Kamra dhoondh raha hoon'], ['landlord', '🏠', 'Kamra kiraye pe deta hoon'], ['visitor', '👀', 'Bas app dekh raha hoon']]
+        .map(([k, e, t]) => `<button class="opt ${A.role === k ? 'on' : ''}" data-role="${k}"><span>${e}</span>${t}</button>`).join('')}</div>
+        <input id="fb-city" class="input" placeholder="Aapka shehar (optional)" value="${esc(A.city)}" style="margin-top:12px">`;
+    } else if (st === 'stars') {
+      q = 'KirayaSetu ko kitne star doge?'; sub = 'Poore experience ke hisaab se'; can = A.stars > 0 && (!guest || !!A.role);
+      const f = FB_FACES[(A.stars || 3) - 1];
+      body = `${guest ? `<p class="chip-label">Pehle batao, aap kaun ho?</p><div class="chips" style="margin-bottom:8px">${[['tenant', 'Kirayedar'], ['landlord', 'Makaan malik'], ['visitor', 'Bas dekh raha hoon']]
+        .map(([k, t]) => `<button class="chip ${A.role === k ? 'on' : ''}" data-role="${k}">${t}</button>`).join('')}</div>` : ''}<div class="big-stars" role="radiogroup" aria-label="Rating">${[1, 2, 3, 4, 5].map(n => `<button role="radio" aria-checked="${n === A.stars}" aria-label="${n} star — ${FB_FACES[n - 1][1]}" class="${n <= A.stars ? 'on' : ''}" data-n="${n}">★</button>`).join('')}</div>
+        <div class="face ${A.stars ? '' : 'dim'}"><span>${A.stars ? f[0] : '⭐'}</span><b>${A.stars ? f[1] : '1 se 5 star'}</b></div>`;
+    } else if (st === 'tags') {
+      const good = A.stars >= 4; tagKey = good ? 'features' : 'issues'; skip = true;
+      q = good ? 'Sabse kaam ka feature kaunsa laga?' : 'Sabse pehle kya theek karein?'; sub = `Zyada se zyada ${FB_MAX} chuno`; skip = false; can = A[tagKey].length > 0;
+      body = chips(good ? FB_FEAT : FB_ISSUES, tagKey);
+    } else if (st === 'problem') {
+      tagKey = 'problems'; can = A.problems.length > 0;
+      q = role === 'landlord' ? 'Kamra kiraye pe dete waqt aapki sabse badi pareshani kya rahi hai?' : 'Kamra dhoondhte waqt aapki sabse badi pareshani kya rahi hai?';
+      sub = `Apne asli anubhav se — zyada se zyada ${FB_MAX} chuno`;
+      body = chips(FB_PROB[role], 'problems');
+    } else if (st === 'need') {
+      q = 'Kya KirayaSetu aapki yeh pareshani door kar sakta hai?'; can = !!A.need;
+      body = `<div class="opts">${[['yes', '👍', 'Haan, bilkul'], ['some', '🤏', 'Thoda bahut'], ['no', '👎', 'Nahi']]
+        .map(([k, e, t]) => `<button class="opt ${A.need === k ? 'on' : ''}" data-need="${k}"><span>${e}</span>${t}</button>`).join('')}</div>`;
+    } else if (st === 'nps') {
+      q = 'Doston ya rishtedaaron ko KirayaSetu batane ka kitna chance hai?'; can = A.rec !== null; skip = true;
+      body = `<div class="nps">${Array.from({ length: 11 }, (_, n) => `<button class="${n <= 6 ? 'lo' : n <= 8 ? 'mid' : 'hi'} ${A.rec === n ? 'on' : ''}" data-rec="${n}">${n}</button>`).join('')}</div>
+        <div class="row small muted" style="justify-content:space-between;margin-top:6px"><span>0 = bilkul nahi</span><span>10 = pakka bataunga</span></div>`;
+    } else {
+      q = 'Ek cheez jo hum badlein ya jodein?'; sub = 'Optional — bol ke ya likh ke. Chhodna ho to seedha "Raay bhejo" dabao';
+      body = `<div style="position:relative"><textarea id="fb-text" class="input" maxlength="500" style="min-height:130px" placeholder="${A.stars >= 4 ? 'Kya aur achha ho sakta hai? Koi naya feature?' : 'Kya galat hua? Hum turant theek karenge.'}">${esc(A.text)}</textarea>
+        ${(window.SpeechRecognition || window.webkitSpeechRecognition) ? `<button id="fb-mic" class="btn ghost sm" style="position:absolute;right:8px;bottom:8px" aria-label="Bol ke batao">${ICON.mic}</button>` : ''}</div>
+        <p class="small muted" style="margin-top:6px">Bina naam ke "Live numbers" page pe dikh sakta hai.</p>`;
+    }
+
+    app.innerHTML = `<div class="fb">
+      <div class="fb-top">
+        <button class="fb-back" aria-label="Pichhla sawaal" ${i ? '' : 'style="visibility:hidden"'}>←</button>
+        <div class="fb-prog" aria-hidden="true"><i style="width:${Math.round(((i + (last ? 1 : 0)) / steps.length) * 100) || 4}%"></i></div>
+        <span class="small muted">${i + 1}/${steps.length}</span>
+      </div>
+      <div class="fb-q"><h2>${q}</h2>${sub ? `<p class="muted small">${sub}</p>` : ''}</div>
+      <div class="fb-body">${body}</div>
+      <div class="fb-actions">
+        ${skip && !last ? `<button class="btn ghost" id="fb-skip">Chhodo</button>` : ''}
+        <button class="btn ${last ? 'genda' : ''}" id="fb-next" ${can ? '' : 'disabled'}>${last ? 'Raay bhejo' : 'Aage'}</button>
+      </div></div>`;
+
+    const keep = () => { if ($('#fb-text')) A.text = $('#fb-text').value; if ($('#fb-city')) A.city = $('#fb-city').value; };
+    $('.fb-back').onclick = () => { keep(); stopListening(); i = Math.max(0, i - 1); draw(); };
+    $('#fb-skip')?.addEventListener('click', () => { keep(); next(); });
+    $('#fb-next').onclick = () => { keep(); last ? submit() : next(); };
+    $$('[data-role]').forEach(b => b.onclick = () => { keep(); if (A.role !== b.dataset.role) A.problems = []; A.role = b.dataset.role; draw(); });
+    $$('.big-stars button').forEach(b => b.onclick = () => { keep(); A.stars = +b.dataset.n; draw(); if (!guest || A.role) next(550); });
+    if (tagKey) $$('[data-tag]').forEach(b => b.onclick = () => {
+      const v = b.dataset.tag, arr = A[tagKey], k = arr.indexOf(v);
+      if (k >= 0) arr.splice(k, 1); else if (arr.length >= FB_MAX) return toast(`Sirf ${FB_MAX} chuno — pehle koi ek hatao`); else arr.push(v);
+      b.classList.toggle('on'); $('#fb-next').disabled = !arr.length;
+    });
+    $$('[data-need]').forEach(b => b.onclick = () => { A.need = b.dataset.need; draw(); next(350); });
+    $$('[data-rec]').forEach(b => b.onclick = () => { A.rec = +b.dataset.rec; draw(); next(350); });
+    $('#fb-mic')?.addEventListener('click', () => {
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (recog) return stopListening();
+      recog = new SR(); recog.lang = store.get('ks_lang', 'hi-IN'); recog.interimResults = true;
+      const base = $('#fb-text').value.trim();
+      recog.onresult = e => { $('#fb-text').value = (base + ' ' + [...e.results].map(r => r[0].transcript).join(' ')).trim(); };
+      recog.onend = () => { recog = null; $('#fb-mic')?.classList.remove('on'); };
+      recog.start(); $('#fb-mic').classList.add('on'); toast('Boliye… rukoge to apne-aap band ho jayega');
+    });
+  }
+
+  async function submit() {
+    const b = $('#fb-next'); b.disabled = true; b.textContent = 'Bhej rahe hain…';
+    const good = A.stars >= 4;
+    const { error } = await sb.from('feedback').insert({
+      user_id: uid() || null, role: A.role || 'visitor', stars: A.stars,
+      problems: A.problems, features: good ? A.features : [], issues: good ? [] : A.issues,
+      need_met: A.need || null, recommend: A.rec, suggestion: A.text.trim() || null, city: A.city.trim() || null,
+    });
+    if (error) { b.disabled = false; b.textContent = 'Raay bhejo'; return toast(error.message, 'bad'); }
+    store.set('ks_fb_done', Date.now());
+    app.innerHTML = `<div class="empty"><div style="font-size:3.2rem">${FB_FACES[A.stars - 1][0]}</div><span class="tag big" style="margin-top:8px">Shukriya!</span>
+      <h2 style="margin:16px 0 8px">Aapki raay mil gayi</h2><p>${good ? 'Achha laga jaankar — doston ko bhi batana 🙏' : 'Hum ise jaldi theek karenge.'}</p>
+      <div class="stack" style="margin-top:18px"><a class="btn" href="#/stats">📊 Dekho baaki log kya keh rahe hain</a><a class="btn ghost" href="#/">${S.session ? 'App pe wapas' : 'App try karo'}</a></div></div>`;
+  }
+  draw();
+}
+
+// =============================================================
+//  LIVE STATS — Problem → Features → Prototype → User Testing
+// =============================================================
+async function viewStats() {
+  const load = async () => {
+    const { data: d, error } = await sb.rpc('public_stats');
+    if (error) throw error;
+    const fb = d.fb_count || 0;
+    const pct = (n, of) => (of ? Math.round((n * 100) / of) : 0);
+    const bars = (list, of, empty) => list.length ? `<div class="bars">${list.map(x => {
+      const p = pct(x.n, of);
+      return `<div class="bar" title="${esc(x.k)}: ${x.n} log (${p}%)"><div class="bar-top"><span>${esc(x.k)}</span><b>${p}%</b></div><div class="bar-track"><i style="width:${Math.max(p, 2)}%"></i></div></div>`;
+    }).join('')}</div>` : `<p class="muted small">${empty}</p>`;
+    const tile = (n, label, sub = '') => `<div class="tile"><b>${n}</b><span>${label}</span>${sub ? `<small>${sub}</small>` : ''}</div>`;
+    const nps = d.rec_count ? pct(d.promoters, d.rec_count) - pct(d.detractors, d.rec_count) : null;
+    const byRole = d.fb_by_role || {};
+    const topProb = d.problems?.[0];
+
+    app.innerHTML = `
+    <div class="stats">
+      <div class="stats-head">
+        <h1>KirayaSetu — live numbers</h1>
+        <p class="muted small">Asli data, apne-aap update hota hai · ${new Date(d.updated).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', second: '2-digit' })}</p>
+      </div>
+
+      <section class="card stat-sec">
+        <div class="sec-h"><span class="step-n">1</span><div><h2>Samasya</h2><p class="muted small">Logon ne khud bataya — sabse badi dikkat</p></div></div>
+        ${topProb ? `<p class="headline"><b>${pct(topProb.n, d.prob_n || fb)}%</b> logon ne kaha: "${esc(topProb.k)}"</p>` : ''}
+        ${bars(d.problems || [], d.prob_n || fb, 'Abhi feedback nahi aaya — pehli raay aap do.')}
+      </section>
+
+      <section class="card stat-sec">
+        <div class="sec-h"><span class="step-n">2</span><div><h2>Zaroori features</h2><p class="muted small">Jinhe app pasand aaya (4–5★), unhe kya sabse achha laga</p></div></div>
+        ${bars(d.features || [], d.feat_n || fb, 'Feedback aate hi yahan dikhega.')}
+      </section>
+
+      <section class="card stat-sec">
+        <div class="sec-h"><span class="step-n">3</span><div><h2>Prototype — asli istemaal</h2><p class="muted small">Live app pe ab tak</p></div></div>
+        <div class="tiles">
+          ${tile(d.listings, 'kamre daale', d.cities ? `${d.cities} shehar` : '')}
+          ${tile(d.voice ? pct(d.voice, d.listings) + '%' : '—', 'bol ke (AI se) daale', `${d.voice} kamre`)}
+          ${tile(d.tenants, 'kirayedar judey')}
+          ${tile(d.landlords, 'makaan malik judey')}
+          ${tile(d.requests, 'visit requests')}
+          ${tile(d.approved, 'approve hui', d.reply_hours != null ? `avg ${d.reply_hours < 1 ? Math.max(1, Math.round(d.reply_hours * 60)) + ' min' : d.reply_hours + ' ghante'} mein jawab` : '')}
+          ${tile(d.deals, 'deal pakki', d.deal_ratings ? `★ ${d.deal_rating} (${d.deal_ratings})` : '')}
+          ${tile(d.rented, 'kamre kiraye pe gaye')}
+        </div>
+      </section>
+
+      <section class="card stat-sec">
+        <div class="sec-h"><span class="step-n">4</span><div><h2>User testing — logon ki raay</h2><p class="muted small">${fb} logon ne rate kiya${fb ? ': ' + Object.entries(byRole).map(([k, v]) => `${v} ${FB_ROLE[k] || k}`).join(', ') : ''}</p></div></div>
+        ${fb ? `
+        <div class="rating-sum">
+          <div class="rs-left"><b>${d.fb_avg}</b><div class="q-stars">${'★'.repeat(Math.round(d.fb_avg))}<span>${'★'.repeat(5 - Math.round(d.fb_avg))}</span></div><small>${fb} ratings</small></div>
+          <div class="rs-bars">${[5, 4, 3, 2, 1].map(n => { const c = (d.star_dist || {})[n] || 0; return `<div class="rs-row" title="${n}★: ${c} log"><span>${n}</span><div class="bar-track"><i style="width:${pct(c, fb)}%"></i></div><small>${c}</small></div>`; }).join('')}</div>
+        </div>
+        <div class="tiles">
+          <div class="tile hero"><b>${pct(d.need_yes, fb)}%</b><span>ne kaha "dikkat door hogi"</span><small>+${pct(d.need_some, fb)}% ne "thoda"</small></div>
+          ${nps != null ? `<div class="tile hero"><b>${nps > 0 ? '+' : ''}${nps}</b><span>NPS score</span><small>${pct(d.promoters, d.rec_count)}% pakka doston ko batayenge</small></div>` : ''}
+        </div>
+        ${d.issues?.length ? `<h3 style="margin:18px 0 8px">Kya sudharna hai (1–3★ walon ne bataya)</h3>${bars(d.issues, d.issue_n || 1, '')}` : ''}
+        ${d.quotes?.length ? `<h3 style="margin:18px 0 8px">Logon ke sujhav</h3><div class="quotes">${d.quotes.map(q => `
+          <figure class="quote"><div class="q-stars" aria-label="${q.stars} star">${'★'.repeat(q.stars)}<span>${'★'.repeat(5 - q.stars)}</span></div>
+          <blockquote>${esc(q.text)}</blockquote><figcaption>${FB_ROLE[q.role] || ''}${q.city ? ', ' + esc(q.city) : ''} · ${timeAgo(q.created_at)}</figcaption></figure>`).join('')}</div>` : ''}`
+        : `<div class="empty" style="padding:18px 0"><p>Abhi kisi ne rate nahi kiya.</p></div>`}
+        <a class="btn genda block section" href="#/feedback">⭐ Aap bhi rate karo (30 sec)</a>
+      </section>
+      ${S.session ? '' : `<a class="btn ghost block section" href="#/">App kholo</a>`}
+    </div>`;
+  };
+  app.innerHTML = '<div class="boot">Numbers aa rahe hain…</div>';
+  await load();
+  S.timers.push(setInterval(() => { if (location.hash === '#/stats') load().catch(() => {}); }, 20000));
 }
 
 // =============================================================
