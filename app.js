@@ -178,17 +178,18 @@ const ROUTES = [
   [/^stats$/, viewStats],
   [/^feedback$/, viewFeedback],
 ];
-const PUBLIC = ['stats', 'feedback'];
+const PUBLIC = ['stats'];
 
 async function render() {
   cleanupView();
   window.scrollTo(0, 0);
   const path = location.hash.replace(/^#\/?/, '').split('?')[0];
   const nav = $('#nav');
+  $('.rate-btn').hidden = !S.session || needsOnboard();
   if (PUBLIC.includes(path)) {
     $('#nav').hidden = !S.session || needsOnboard();
     $$('#nav a').forEach(a => a.classList.remove('on'));
-    try { return await (path === 'stats' ? viewStats() : viewFeedback()); } catch (e) { console.error(e); app.innerHTML = errorBox(e); return; }
+    try { return await viewStats(); } catch (e) { console.error(e); app.innerHTML = errorBox(e); return; }
   }
   if (!S.session) {
     if (path && path !== 'login') store.set('ks_after_login', path);
@@ -234,7 +235,7 @@ function viewLogin() {
     <svg viewBox="0 0 48 48" aria-hidden="true" style="width:20px;height:20px;stroke:none"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.6 5.4 2.7 13.3l7.9 6.1C12.5 13.6 17.8 9.5 24 9.5z"/><path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.2 5.3-4.6 6.9l7.4 5.7c4.3-4 6.9-9.9 6.9-17.1z"/><path fill="#FBBC05" d="M10.6 28.6A14.5 14.5 0 0 1 9.5 24c0-1.6.3-3.2.8-4.6l-7.9-6.1A24 24 0 0 0 0 24c0 3.9.9 7.5 2.7 10.7l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.8-5.8l-7.4-5.7c-2.1 1.4-4.8 2.3-8.4 2.3-6.2 0-11.5-4.1-13.4-9.8l-7.9 6.1C6.6 42.6 14.6 48 24 48z"/></svg>Google se login karo
   </button>
   <p class="small muted" style="text-align:center;margin-top:12px">Login karke aap <a href="/privacy.html">privacy niyam</a> maante hain.</p>
-  <div class="row section"><a class="btn ghost" href="#/stats">📊 Live numbers dekho</a><a class="btn ghost" href="#/feedback">⭐ Bina login rate karo</a></div>`;
+  <div class="row section"><a class="btn ghost" href="#/stats">📊 Live numbers dekho</a></div>`;
   $('#glogin').onclick = async () => {
     const { error } = await sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: location.origin + '/' } });
     if (error) toast(error.message, 'bad');
@@ -1077,79 +1078,72 @@ const FB_FACES = [['😞', 'Bahut bura'], ['🙁', 'Bura'], ['😐', 'Theek-thaa
 const FB_ISSUES = ['Samajhna mushkil laga', 'Mere area mein kamre kam', 'Login mein dikkat', 'App slow hai', 'Call/chat nahi chala', 'Bol ke bharna galat samjha', 'Kuch aur'];
 const FB_MAX = 2;
 
-// Uber/Zomato jaisa: ek screen pe ek sawaal, pehle star, phir star ke hisaab se sawaal
+// Ek screen = ek sawaal (Zomato/Swiggy jaisa). Pehle 4 sawaal, sabse aakhir mein ⭐ rating + optional sujhav. Sirf login users.
+const FB_OK = 'Kuch nahi — sab theek hai';
 function viewFeedback() {
-  const A = { role: S.profile?.role || '', stars: 0, problems: [], features: [], issues: [], need: '', rec: null, text: '', city: S.profile?.city || '' };
-  const steps = ['stars', 'tags', 'problem', 'need', 'text'];
-  const guest = !S.session;
+  const A = { role: S.profile?.role || 'tenant', stars: 0, problems: [], features: [], issues: [], need: '', text: '', city: S.profile?.city || '' };
+  const steps = ['problem', 'features', 'issues', 'need', 'stars'];
   let i = 0;
   const next = (delay = 0) => setTimeout(() => { i = Math.min(i + 1, steps.length - 1); draw(); }, delay);
   const chips = (list, key) => `<div class="chips fb-chips">${list.map(x => `<button class="chip ${A[key].includes(x) ? 'on' : ''}" data-tag="${esc(x)}">${esc(x)}</button>`).join('')}</div>`;
 
   function draw() {
-    const st = steps[i], role = A.role || 'visitor', last = i === steps.length - 1;
-    let q = '', sub = '', body = '', can = true, skip = false, tagKey = null;
-    if (st === 'role') {
-      q = 'Aap kaun ho?'; can = !!A.role;
-      body = `<div class="opts">${[['tenant', '🔍', 'Kamra dhoondh raha hoon'], ['landlord', '🏠', 'Kamra kiraye pe deta hoon'], ['visitor', '👀', 'Bas app dekh raha hoon']]
-        .map(([k, e, t]) => `<button class="opt ${A.role === k ? 'on' : ''}" data-role="${k}"><span>${e}</span>${t}</button>`).join('')}</div>
-        <input id="fb-city" class="input" placeholder="Aapka shehar (optional)" value="${esc(A.city)}" style="margin-top:12px">`;
-    } else if (st === 'stars') {
-      q = 'KirayaSetu ko kitne star doge?'; sub = 'Poore experience ke hisaab se'; can = A.stars > 0 && (!guest || !!A.role);
-      const f = FB_FACES[(A.stars || 3) - 1];
-      body = `${guest ? `<p class="chip-label">Pehle batao, aap kaun ho?</p><div class="chips" style="margin-bottom:8px">${[['tenant', 'Kirayedar'], ['landlord', 'Makaan malik'], ['visitor', 'Bas dekh raha hoon']]
-        .map(([k, t]) => `<button class="chip ${A.role === k ? 'on' : ''}" data-role="${k}">${t}</button>`).join('')}</div>` : ''}<div class="big-stars" role="radiogroup" aria-label="Rating">${[1, 2, 3, 4, 5].map(n => `<button role="radio" aria-checked="${n === A.stars}" aria-label="${n} star — ${FB_FACES[n - 1][1]}" class="${n <= A.stars ? 'on' : ''}" data-n="${n}">★</button>`).join('')}</div>
-        <div class="face ${A.stars ? '' : 'dim'}"><span>${A.stars ? f[0] : '⭐'}</span><b>${A.stars ? f[1] : '1 se 5 star'}</b></div>`;
-    } else if (st === 'tags') {
-      const good = A.stars >= 4; tagKey = good ? 'features' : 'issues'; skip = true;
-      q = good ? 'Sabse kaam ka feature kaunsa laga?' : 'Sabse pehle kya theek karein?'; sub = `Zyada se zyada ${FB_MAX} chuno`; skip = false; can = A[tagKey].length > 0;
-      body = chips(good ? FB_FEAT : FB_ISSUES, tagKey);
-    } else if (st === 'problem') {
+    const st = steps[i], last = i === steps.length - 1, role = A.role;
+    let q = '', sub = '', body = '', can = true, tagKey = null;
+    if (st === 'problem') {
       tagKey = 'problems'; can = A.problems.length > 0;
       q = role === 'landlord' ? 'Kamra kiraye pe dete waqt aapki sabse badi pareshani kya rahi hai?' : 'Kamra dhoondhte waqt aapki sabse badi pareshani kya rahi hai?';
       sub = `Apne asli anubhav se — zyada se zyada ${FB_MAX} chuno`;
-      body = chips(FB_PROB[role], 'problems');
+      body = chips(FB_PROB[role] || FB_PROB.tenant, 'problems');
+    } else if (st === 'features') {
+      tagKey = 'features'; can = A.features.length > 0;
+      q = 'KirayaSetu ka sabse kaam ka feature kaunsa laga?'; sub = `Zyada se zyada ${FB_MAX} chuno`;
+      body = chips(FB_FEAT, 'features');
+    } else if (st === 'issues') {
+      tagKey = 'issues'; can = A.issues.length > 0;
+      q = 'App mein sabse pehle kya theek karein?'; sub = 'Koi dikkat na lagi ho to "sab theek hai" chuno';
+      body = chips([FB_OK, ...FB_ISSUES], 'issues');
     } else if (st === 'need') {
       q = 'Kya KirayaSetu aapki yeh pareshani door kar sakta hai?'; can = !!A.need;
       body = `<div class="opts">${[['yes', '👍', 'Haan, bilkul'], ['some', '🤏', 'Thoda bahut'], ['no', '👎', 'Nahi']]
         .map(([k, e, t]) => `<button class="opt ${A.need === k ? 'on' : ''}" data-need="${k}"><span>${e}</span>${t}</button>`).join('')}</div>`;
-    } else if (st === 'nps') {
-      q = 'Doston ya rishtedaaron ko KirayaSetu batane ka kitna chance hai?'; can = A.rec !== null; skip = true;
-      body = `<div class="nps">${Array.from({ length: 11 }, (_, n) => `<button class="${n <= 6 ? 'lo' : n <= 8 ? 'mid' : 'hi'} ${A.rec === n ? 'on' : ''}" data-rec="${n}">${n}</button>`).join('')}</div>
-        <div class="row small muted" style="justify-content:space-between;margin-top:6px"><span>0 = bilkul nahi</span><span>10 = pakka bataunga</span></div>`;
     } else {
-      q = 'Ek cheez jo hum badlein ya jodein?'; sub = 'Optional — bol ke ya likh ke. Chhodna ho to seedha "Raay bhejo" dabao';
-      body = `<div style="position:relative"><textarea id="fb-text" class="input" maxlength="500" style="min-height:130px" placeholder="${A.stars >= 4 ? 'Kya aur achha ho sakta hai? Koi naya feature?' : 'Kya galat hua? Hum turant theek karenge.'}">${esc(A.text)}</textarea>
-        ${(window.SpeechRecognition || window.webkitSpeechRecognition) ? `<button id="fb-mic" class="btn ghost sm" style="position:absolute;right:8px;bottom:8px" aria-label="Bol ke batao">${ICON.mic}</button>` : ''}</div>
-        <p class="small muted" style="margin-top:6px">Bina naam ke "Live numbers" page pe dikh sakta hai.</p>`;
+      q = 'Aakhir mein — KirayaSetu ko kitne star doge?'; sub = 'Poore experience ke hisaab se'; can = A.stars > 0;
+      const f = FB_FACES[(A.stars || 3) - 1];
+      body = `<div class="big-stars" role="radiogroup" aria-label="Rating">${[1, 2, 3, 4, 5].map(n => `<button role="radio" aria-checked="${n === A.stars}" aria-label="${n} star — ${FB_FACES[n - 1][1]}" class="${n <= A.stars ? 'on' : ''}" data-n="${n}">★</button>`).join('')}</div>
+        <div class="face ${A.stars ? '' : 'dim'}"><span>${A.stars ? f[0] : '⭐'}</span><b>${A.stars ? f[1] : '1 se 5 star'}</b></div>
+        <p class="chip-label" style="margin-top:22px">Kuch aur kehna hai? <span class="muted">(optional)</span></p>
+        <div style="position:relative"><textarea id="fb-text" class="input" maxlength="500" placeholder="Bol ke ya likh ke — koi naya feature, ya kya galat laga">${esc(A.text)}</textarea>
+        ${(window.SpeechRecognition || window.webkitSpeechRecognition) ? `<button id="fb-mic" class="btn ghost sm" style="position:absolute;right:8px;bottom:8px" aria-label="Bol ke batao">${ICON.mic}</button>` : ''}</div>`;
     }
 
     app.innerHTML = `<div class="fb">
       <div class="fb-top">
         <button class="fb-back" aria-label="Pichhla sawaal" ${i ? '' : 'style="visibility:hidden"'}>←</button>
-        <div class="fb-prog" aria-hidden="true"><i style="width:${Math.round(((i + (last ? 1 : 0)) / steps.length) * 100) || 4}%"></i></div>
+        <div class="fb-prog" aria-hidden="true"><i style="width:${Math.round(((i + 1) / steps.length) * 100)}%"></i></div>
         <span class="small muted">${i + 1}/${steps.length}</span>
       </div>
       <div class="fb-q"><h2>${q}</h2>${sub ? `<p class="muted small">${sub}</p>` : ''}</div>
       <div class="fb-body">${body}</div>
-      <div class="fb-actions">
-        ${skip && !last ? `<button class="btn ghost" id="fb-skip">Chhodo</button>` : ''}
-        <button class="btn ${last ? 'genda' : ''}" id="fb-next" ${can ? '' : 'disabled'}>${last ? 'Raay bhejo' : 'Aage'}</button>
-      </div></div>`;
+      <div class="fb-actions"><button class="btn ${last ? 'genda' : ''}" id="fb-next" ${can ? '' : 'disabled'}>${last ? 'Raay bhejo' : 'Aage'}</button></div></div>`;
 
-    const keep = () => { if ($('#fb-text')) A.text = $('#fb-text').value; if ($('#fb-city')) A.city = $('#fb-city').value; };
+    const keep = () => { if ($('#fb-text')) A.text = $('#fb-text').value; };
     $('.fb-back').onclick = () => { keep(); stopListening(); i = Math.max(0, i - 1); draw(); };
-    $('#fb-skip')?.addEventListener('click', () => { keep(); next(); });
     $('#fb-next').onclick = () => { keep(); last ? submit() : next(); };
-    $$('[data-role]').forEach(b => b.onclick = () => { keep(); if (A.role !== b.dataset.role) A.problems = []; A.role = b.dataset.role; draw(); });
-    $$('.big-stars button').forEach(b => b.onclick = () => { keep(); A.stars = +b.dataset.n; draw(); if (!guest || A.role) next(550); });
     if (tagKey) $$('[data-tag]').forEach(b => b.onclick = () => {
-      const v = b.dataset.tag, arr = A[tagKey], k = arr.indexOf(v);
-      if (k >= 0) arr.splice(k, 1); else if (arr.length >= FB_MAX) return toast(`Sirf ${FB_MAX} chuno — pehle koi ek hatao`); else arr.push(v);
-      b.classList.toggle('on'); $('#fb-next').disabled = !arr.length;
+      const v = b.dataset.tag;
+      let arr = A[tagKey];
+      if (tagKey === 'issues' && v === FB_OK) arr = A.issues = arr.includes(FB_OK) ? [] : [FB_OK];
+      else {
+        if (tagKey === 'issues') arr = A.issues = arr.filter(x => x !== FB_OK);
+        const k = arr.indexOf(v);
+        if (k >= 0) arr.splice(k, 1); else if (arr.length >= FB_MAX) return toast(`Sirf ${FB_MAX} chuno — pehle koi ek hatao`); else arr.push(v);
+      }
+      $$('[data-tag]').forEach(x => x.classList.toggle('on', A[tagKey].includes(x.dataset.tag)));
+      $('#fb-next').disabled = !A[tagKey].length;
     });
     $$('[data-need]').forEach(b => b.onclick = () => { A.need = b.dataset.need; draw(); next(350); });
-    $$('[data-rec]').forEach(b => b.onclick = () => { A.rec = +b.dataset.rec; draw(); next(350); });
+    $$('.big-stars button').forEach(b => b.onclick = () => { keep(); A.stars = +b.dataset.n; draw(); });
     $('#fb-mic')?.addEventListener('click', () => {
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (recog) return stopListening();
@@ -1163,17 +1157,17 @@ function viewFeedback() {
 
   async function submit() {
     const b = $('#fb-next'); b.disabled = true; b.textContent = 'Bhej rahe hain…';
-    const good = A.stars >= 4;
     const { error } = await sb.from('feedback').insert({
-      user_id: uid() || null, role: A.role || 'visitor', stars: A.stars,
-      problems: A.problems, features: good ? A.features : [], issues: good ? [] : A.issues,
-      need_met: A.need || null, recommend: A.rec, suggestion: A.text.trim() || null, city: A.city.trim() || null,
+      user_id: uid(), role: A.role, stars: A.stars,
+      problems: A.problems, features: A.features, issues: A.issues.filter(x => x !== FB_OK),
+      need_met: A.need || null, suggestion: A.text.trim() || null, city: A.city.trim() || null,
     });
     if (error) { b.disabled = false; b.textContent = 'Raay bhejo'; return toast(error.message, 'bad'); }
     store.set('ks_fb_done', Date.now());
+    const good = A.stars >= 4;
     app.innerHTML = `<div class="empty"><div style="font-size:3.2rem">${FB_FACES[A.stars - 1][0]}</div><span class="tag big" style="margin-top:8px">Shukriya!</span>
       <h2 style="margin:16px 0 8px">Aapki raay mil gayi</h2><p>${good ? 'Achha laga jaankar — doston ko bhi batana 🙏' : 'Hum ise jaldi theek karenge.'}</p>
-      <div class="stack" style="margin-top:18px"><a class="btn" href="#/stats">📊 Dekho baaki log kya keh rahe hain</a><a class="btn ghost" href="#/">${S.session ? 'App pe wapas' : 'App try karo'}</a></div></div>`;
+      <div class="stack" style="margin-top:18px"><a class="btn" href="#/stats">📊 Dekho baaki log kya keh rahe hain</a><a class="btn ghost" href="#/">App pe wapas</a></div></div>`;
   }
   draw();
 }
@@ -1210,7 +1204,7 @@ async function viewStats() {
       </section>
 
       <section class="card stat-sec">
-        <div class="sec-h"><span class="step-n">2</span><div><h2>Zaroori features</h2><p class="muted small">Jinhe app pasand aaya (4–5★), unhe kya sabse achha laga</p></div></div>
+        <div class="sec-h"><span class="step-n">2</span><div><h2>Zaroori features</h2><p class="muted small">Logon ko sabse kaam ka kya laga</p></div></div>
         ${bars(d.features || [], d.feat_n || fb, 'Feedback aate hi yahan dikhega.')}
       </section>
 
@@ -1239,12 +1233,12 @@ async function viewStats() {
           <div class="tile hero"><b>${pct(d.need_yes, fb)}%</b><span>ne kaha "dikkat door hogi"</span><small>+${pct(d.need_some, fb)}% ne "thoda"</small></div>
           ${nps != null ? `<div class="tile hero"><b>${nps > 0 ? '+' : ''}${nps}</b><span>NPS score</span><small>${pct(d.promoters, d.rec_count)}% pakka doston ko batayenge</small></div>` : ''}
         </div>
-        ${d.issues?.length ? `<h3 style="margin:18px 0 8px">Kya sudharna hai (1–3★ walon ne bataya)</h3>${bars(d.issues, d.issue_n || 1, '')}` : ''}
+        ${d.issues?.length ? `<h3 style="margin:18px 0 8px">Logon ne kya sudharne ko kaha</h3>${bars(d.issues, d.issue_n || 1, '')}` : ''}
         ${d.quotes?.length ? `<h3 style="margin:18px 0 8px">Logon ke sujhav</h3><div class="quotes">${d.quotes.map(q => `
           <figure class="quote"><div class="q-stars" aria-label="${q.stars} star">${'★'.repeat(q.stars)}<span>${'★'.repeat(5 - q.stars)}</span></div>
           <blockquote>${esc(q.text)}</blockquote><figcaption>${FB_ROLE[q.role] || ''}${q.city ? ', ' + esc(q.city) : ''} · ${timeAgo(q.created_at)}</figcaption></figure>`).join('')}</div>` : ''}`
         : `<div class="empty" style="padding:18px 0"><p>Abhi kisi ne rate nahi kiya.</p></div>`}
-        <a class="btn genda block section" href="#/feedback">⭐ Aap bhi rate karo (30 sec)</a>
+        <a class="btn genda block section" href="#/feedback">${S.session ? '⭐ Aap bhi rate karo (30 sec)' : '⭐ Login karke rate karo'}</a>
       </section>
       ${S.session ? '' : `<a class="btn ghost block section" href="#/">App kholo</a>`}
     </div>`;
